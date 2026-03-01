@@ -138,12 +138,19 @@ def tension_235(series):
     return (ema2-ema3).abs() + (ema3-ema5).abs()
 
 def compute_edge_pct(price, tension, k, quantile=0.85):
+    # Asegurar que price y tension tengan el mismo índice
+    common_idx = price.index.intersection(tension.index)
+    price = price.loc[common_idx]
+    tension = tension.loc[common_idx]
+    
     mask = tension > tension.quantile(quantile)
     if mask.sum() == 0:
         return np.nan, np.nan
-    future_ret = (price.shift(-k)-price)/price
+    future_ret = (price.shift(-k) - price) / price
+    # Alinear future_ret con el índice de mask (ya tienen el mismo índice)
+    future_ret = future_ret.loc[common_idx]  # aunque shift introduce NaN al final
     edge = future_ret[mask].mean()
-    hitrate = (future_ret[mask]>0).mean()
+    hitrate = (future_ret[mask] > 0).mean()
     return edge, hitrate
 
 def compute_pidelta(price, window=20):
