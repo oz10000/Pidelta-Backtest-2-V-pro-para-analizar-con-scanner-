@@ -1,0 +1,35 @@
+name: Backtest de Tensión 2-3-5
+
+on:
+  workflow_dispatch:          # Permite ejecución manual
+  schedule:
+    - cron: '0 */6 * * *'     # Cada 6 horas (opcional)
+
+jobs:
+  run-backtest:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Clonar repositorio
+      uses: actions/checkout@v3
+
+    - name: Configurar Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Instalar dependencias
+      run: |
+        python -m pip install --upgrade pip
+        pip install pandas numpy requests
+
+    - name: Ejecutar backtest
+      run: python scanner_backtest.py   # Asegúrate de que el nombre coincida
+
+    - name: Subir resultados como artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Resultados-Backtest
+        path: |
+          backtest_completo.txt
+          escaneo_*.txt
