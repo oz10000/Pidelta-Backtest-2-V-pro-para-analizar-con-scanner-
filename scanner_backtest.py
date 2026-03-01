@@ -13,12 +13,11 @@ warnings.filterwarnings('ignore')
 # CONFIGURACIÓN
 # ============================================================
 EXCHANGE = "multi"
-TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m", "1h", "4h", "8h", "12h", "1d"]
+TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m", "1h", "4h"]  # Reducido para mayor probabilidad
 LOOKBACK_CANDLES = 300
 TP_PCT = 0.02
 SL_PCT = 0.01
 
-# Activos fijos (puedes cambiarlos aquí)
 ASSETS = ["BTC", "ETH", "SOL"]
 BASE_SYMBOLS = ["BTC", "ETH", "SOL"]
 
@@ -108,14 +107,20 @@ def fetch_klines(symbol, timeframe):
     cryptocom_sym = symbol if '_' in symbol else f"{symbol}_USDT"
 
     df = fetch_klines_kucoin(kucoin_sym, timeframe, limit=LOOKBACK_CANDLES)
-    if df is not None and len(df)>50: DATA_CACHE[key]=df; return df
+    if df is not None and len(df)>50: 
+        DATA_CACHE[key]=df
+        return df
     df = fetch_klines_cryptocom(cryptocom_sym, timeframe, limit=LOOKBACK_CANDLES)
-    if df is not None and len(df)>50: DATA_CACHE[key]=df; return df
+    if df is not None and len(df)>50: 
+        DATA_CACHE[key]=df
+        return df
 
     coingecko_ids={'BTC':'bitcoin','ETH':'ethereum','SOL':'solana'}
     if symbol in coingecko_ids:
         df = fetch_klines_coingecko(coingecko_ids[symbol], timeframe)
-        if df is not None and len(df)>20: DATA_CACHE[key]=df; return df
+        if df is not None and len(df)>20: 
+            DATA_CACHE[key]=df
+            return df
 
     print(f"   ⚠️ No se pudieron obtener datos para {symbol} {timeframe}")
     return None
@@ -134,6 +139,8 @@ def tension_235(series):
 
 def compute_edge_pct(price, tension, k, quantile=0.85):
     mask = tension > tension.quantile(quantile)
+    if mask.sum() == 0:
+        return np.nan, np.nan
     future_ret = (price.shift(-k)-price)/price
     edge = future_ret[mask].mean()
     hitrate = (future_ret[mask]>0).mean()
@@ -153,12 +160,22 @@ def compute_corr(pidelta1, pidelta2):
 # ============================================================
 def analyze_symbol_tf(symbol, tf):
     df = fetch_klines(symbol, tf)
-    if df is None or len(df)<100: return None, None
+    if df is None or len(df) < 50: 
+        print(f"   ⚠️ {symbol} {tf}: menos de 50 velas")
+        return None, None
 
-    price = df['close']
-    volume = df['volume']
+    price = df['close'].dropna()
+    if len(price) < 50:
+        print(f"   ⚠️ {symbol} {tf}: precio con pocos datos")
+        return None, None
+        
+    volume = df['volume'].fillna(0)
     S = normalize(price)
-    T = tension_235(S)
+    T = tension_235(S).dropna()
+    if len(T) < 30:
+        print(f"   ⚠️ {symbol} {tf}: tensión insuficiente ({len(T)} puntos)")
+        return None, None
+        
     pidelta = compute_pidelta(price)
 
     k_values=[1,2,3,5,8,13,21]
@@ -166,24 +183,29 @@ def analyze_symbol_tf(symbol, tf):
     best_result=None
 
     for k in k_values:
-        edge_pct, hitrate = compute_edge_pct(price,T,k)
+        edge_pct, hitrate = compute_edge_pct(price, T, k)
+        if np.isnan(edge_pct):
+            continue
+            
         # Monte Carlo simplificado
         mc_edges = []
-        for _ in range(30):
-            perm = np.random.permutation(S.values)
-            T_mc = tension_235(pd.Series(perm, index=S.index))
-            mc_e, _ = compute_edge_pct(price,T_mc,k)
-            mc_edges.append(mc_e)
+        for _ in range(20):  # reducido para velocidad
+            perm = np.random.permutation(S.dropna().values)
+            T_mc = tension_235(pd.Series(perm, index=S.dropna().index))
+            mc_e, _ = compute_edge_pct(price, T_mc, k)
+            if not np.isnan(mc_e):
+                mc_edges.append(mc_e)
+        if len(mc_edges) < 5:
+            continue
         mc_mean = np.nanmean(mc_edges)
         mc_std = np.nanstd(mc_edges)
         Z = (edge_pct - mc_mean) / (mc_std + 1e-9)
 
-        # Tiempo medio hasta alcanzar el edge (aproximado)
+        # Tiempo medio hasta alcanzar el edge (target porcentual)
         mask = T > T.quantile(0.85)
-        # Usamos el retorno medio como target (en porcentaje)
+        idxs = np.where(mask)[0]
         target = edge_pct
         tau_list = []
-        idxs = np.where(mask)[0]
         for idx in idxs:
             if idx + 50 >= len(price): continue
             base = price.iloc[idx]
@@ -196,9 +218,7 @@ def analyze_symbol_tf(symbol, tf):
                 elif target<0 and price.iloc[idx+i] <= target_price:
                     tau_list.append(i)
                     break
-        tau = np.nanmean(tau_list) if tau_list else np.nan
-
-        if np.isnan(tau) or tau==0: continue
+        tau = np.nanmean(tau_list) if tau_list else 100.0  # si no hay, asignamos un valor grande
 
         score = abs(Z) * abs(edge_pct) / tau
         if score > best_score:
@@ -219,9 +239,11 @@ def analyze_symbol_tf(symbol, tf):
 def scan_timeframe(tf):
     results = []
     base_pideltas = {}
+    # Obtener PIDelta de activos base para correlación
     for base in BASE_SYMBOLS:
         _, pid = analyze_symbol_tf(base, tf)
-        if pid is not None: base_pideltas[base]=pid
+        if pid is not None: 
+            base_pideltas[base]=pid
     for asset in ASSETS:
         print(f"🔍 Analizando {asset} {tf}...")
         sys.stdout.flush()
@@ -230,14 +252,14 @@ def scan_timeframe(tf):
             for base in BASE_SYMBOLS:
                 if base in base_pideltas and pid is not None:
                     common_idx = pid.index.intersection(base_pideltas[base].index)
-                    corr = compute_corr(pid.loc[common_idx], base_pideltas[base].loc[common_idx]) if len(common_idx)>10 else np.nan
+                    corr = compute_corr(pid.loc[common_idx], base_pideltas[base].loc[common_idx]) if len(common_idx)>5 else np.nan
                     result[f'Corr_{base}'] = corr
                 else:
                     result[f'Corr_{base}'] = np.nan
             results.append(result)
             print(f"   ✅ {asset} {tf} | Edge: {result['Edge_%']:.4%} | HitRate: {result['HitRate']:.2%} | Score: {result['Score']:.4f}")
         else:
-            print(f"   ⚠️ {asset} {tf}: no se obtuvieron suficientes datos")
+            print(f"   ⚠️ {asset} {tf}: no se obtuvieron resultados")
         time.sleep(0.2)
     df_results = pd.DataFrame(results)
     if not df_results.empty:
